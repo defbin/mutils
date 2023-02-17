@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+
+import hashlib
+import sys
+
+import bson.json_util as json
+import pymongo
+
+
+def dump_configsvr(uri):
+    c = pymongo.MongoClient(uri).get_database('config')
+    dbs = list(c.get_collection('databases').find())
+    colls = [c for c in c.get_collection(
+        'collections').find() if c['_id'] != 'config.system.sessions']
+    chunks = list(c.get_collection('chunks').find(
+        {'uuid': {'$in': [coll['uuid'] for coll in colls]}}))
+    return {
+        'databases': dbs,
+        'collections': colls,
+        'chunks': chunks,
+    }
+
+
+def dump_shard(uri):
+    rv = []
+    c = pymongo.MongoClient(uri)
+    for db_name in c.list_database_names():
+        if db_name in ['admin', 'config', 'local']:
+            continue
+
+        db = c.get_database(db_name)
+        res = db.command('dbHash')
+        for coll in db.list_collections():
+            n = coll['name']
+            count = db.get_collection(n).count_documents({})
+            rv.append({
+                'ns': f'{db_name}.{n}',
+                'info': coll,
+                'hash': res['collections'][n],
+                'count': count,
+            })
+
+    return rv
+
+
+def main():
+    rv = {}
+
+    m = pymongo.MongoClient()
+    nss = set()
+    for rs, uri in m.get_database('admin').command('getShardMap')['map'].items():
+        dump = dump_configsvr if rs == 'config' else dump_shard
+        r = rv[rs] = dump(uri.split('/', 1)[1])
+        if rs != 'config':
+            nss.update(c['ns'] for c in r)
+
+
+    h, c = rv['hash'], rv['count'] = {}, {}
+    for ns in nss:
+        d, cl = ns.split('.', 1)
+        md5, count = hashlib.md5(), 0
+        for doc in m.get_database(d).get_collection(cl).find():
+            md5.update(doc['_id'].binary + b'|' + doc['i'].to_bytes(2, 'big'))
+            count += 1
+        h[ns], c[ns] = md5.hexdigest(), count
+
+    sys.stdout.write(json.dumps(rv))
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+
+import csv
+import heapq
+import sys
+
+from bson import json_util as json
+from pymongo import MongoClient
+
+skip_colls = {
+    'config.mongos',
+    'config.lockpings',
+    'config.system.sessions',
+}
+
+
+class NoMongosErr(Exception):
+    pass
+
+
+def make_cluster_oplog_cursor(uri=None,
+                              filter={'op': {'$ne': 'n'}},
+                              projection=['ts', 'rs', 'op', 'ns', 'o', 'o2']):
+    c = MongoClient(uri)
+    if not c.is_mongos:
+        raise NoMongosErr()
+
+    shard_map = c.get_database('admin').command('getShardMap')
+    cursors = {}
+    for uri in shard_map['map'].values():
+        rs, uri = uri.split('/')
+        c = MongoClient(uri).get_database('local').get_collection('oplog.rs')
+        cursors[rs] = c.find(filter=filter, projection=projection)
+
+    return _merge_cursors(cursors)
+
+
+class _Orderable:
+    def __init__(self, doc): self.d = doc
+    def __eq__(self, o): return self.d['ts'] == o.d['ts']
+    def __lt__(self, o): return self.d['ts'] < o.d['ts']
+
+
+def _merge_cursors(rss: dict[str, str]):
+    q = []
+    for rs, cur in rss.items():
+        try:
+            doc = cur.next()
+        except StopIteration:
+            continue
+
+        doc['rs'] = rs
+        q.append(_Orderable(doc))
+
+    heapq.heapify(q)
+
+    while len(q):
+        doc = heapq.heappop(q).d
+        rs = doc['rs']
+        yield doc
+
+        try:
+            doc = rss[rs].next()
+        except StopIteration:
+            continue
+
+        doc['rs'] = rs
+        heapq.heappush(q, _Orderable(doc))
+
+
+def main():
+    uri = 'localhost:27017'
+    filter = {
+        'ns': {'$nin': list(skip_colls)},
+        'op': {'$ne': 'n'},
+    }
+    try:
+        oplog = make_cluster_oplog_cursor(filter=filter)
+    except NoMongosErr:
+        print('ERR: must be mongos', file=sys.stderr, flush=True)
+        exit(1)
+
+    w = csv.DictWriter(sys.stdout,
+                       fieldnames=['ts', 'rs', 'ns', 'op', 'q', 'o'],
+                       extrasaction='ignore')
+
+    w.writeheader()
+    for doc in oplog:
+        if doc['op'] == 'n':
+            continue
+
+        w.writerow({
+            'ts': f'{doc["ts"].time}.{doc["ts"].inc}',
+            'rs': doc['rs'],
+            'ns': doc['ns'],
+            'op': doc['op'],
+            'q': doc.get('o2'),
+            'o': json.dumps(doc['o']),
+        })
+
+
+def parse_argv():
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--uri', help='Mongos URI')
+    parser.add_argument('range', help='Cluster time range (e.g. 0:)')
+    args, _ = parser.parse_known_args()
+    return args
+
+
+if __name__ == '__main__':
+    from signal import SIG_DFL, SIGPIPE, signal
+
+    signal(SIGPIPE, SIG_DFL)
+    main()
