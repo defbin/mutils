@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
 
 import csv
+import json
 import heapq
 import sys
 
-from bson import json_util as json
+from bson import json_util as bson
 from pymongo import MongoClient
 
 skip_colls = {
     'config.mongos',
     'config.lockpings',
     'config.system.sessions',
+    'config.changelog',
+    'config.cache.chunks.config.system.sessions',
+    'config.cache.collections'
+    'admin.pbmAgents',
+    'admin.pbmLog',
 }
+
+# creds = dict(username='adm', password='pass')
+creds = {}
 
 
 class NoMongosErr(Exception):
@@ -21,16 +30,18 @@ class NoMongosErr(Exception):
 def make_cluster_oplog_cursor(uri=None,
                               filter={'op': {'$ne': 'n'}},
                               projection=['ts', 'rs', 'op', 'ns', 'o', 'o2']):
-    c = MongoClient(uri)
+    c = MongoClient(uri, **creds)
     if not c.is_mongos:
-        raise NoMongosErr()
+        c = MongoClient(uri, **creds).get_database('local').get_collection('oplog.rs')
+        return c.find(filter=filter, projection=None)
+        # raise NoMongosErr()
 
     shard_map = c.get_database('admin').command('getShardMap')
     cursors = {}
     for uri in shard_map['map'].values():
         rs, uri = uri.split('/')
-        c = MongoClient(uri).get_database('local').get_collection('oplog.rs')
-        cursors[rs] = c.find(filter=filter, projection=projection)
+        c = MongoClient(uri, **creds).get_database('local').get_collection('oplog.rs')
+        cursors[rs] = c.find(filter=filter, projection=None)
 
     return _merge_cursors(cursors)
 
@@ -69,7 +80,6 @@ def _merge_cursors(rss: dict[str, str]):
 
 
 def main():
-    uri = 'localhost:27017'
     filter = {
         'ns': {'$nin': list(skip_colls)},
         'op': {'$ne': 'n'},
@@ -80,9 +90,14 @@ def main():
         print('ERR: must be mongos', file=sys.stderr, flush=True)
         exit(1)
 
+    oplog = [a for a in oplog if a["ns"] not in skip_colls]
+    with open("/Users/defbin/percona/pbm/.dev/oplog.json", 'w') as f:
+        f.write(bson.dumps(oplog))
+
     w = csv.DictWriter(sys.stdout,
                        fieldnames=['ts', 'rs', 'ns', 'op', 'q', 'o'],
-                       extrasaction='ignore')
+                       extrasaction='ignore',
+                       lineterminator='\n')
 
     w.writeheader()
     for doc in oplog:
@@ -91,11 +106,11 @@ def main():
 
         w.writerow({
             'ts': f'{doc["ts"].time}.{doc["ts"].inc}',
-            'rs': doc['rs'],
+            'rs': doc.get('rs'),
             'ns': doc['ns'],
             'op': doc['op'],
             'q': doc.get('o2'),
-            'o': json.dumps(doc['o']),
+            'o': bson.dumps(doc['o']),
         })
 
 

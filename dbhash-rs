@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+
+import sys
+
+import bson.json_util as json
+import pymongo
+
+
+def main():
+    rv = {}
+
+    # m = pymongo.MongoClient("mongodb://adm:pass@rs00:30000")
+    m = pymongo.MongoClient("mongodb://rs00:27017")
+    # m = pymongo.MongoClient("mongodb://rs00:30000")
+    for db in m.list_databases():
+        for coll in m.get_database(db["name"]).list_collections():
+            try:
+                coll["info"]["uuid"] = coll["info"]["uuid"].hex()
+            except KeyError:
+                pass
+
+            if db["name"] not in ["admin", "config", "local"]:
+                coll["docs"] = list(
+                    m.get_database(db["name"]).get_collection(coll["name"]).find({})
+                )
+
+            rv[f"{coll['type'][:4]}:{db['name']}.{coll['name']}"] = coll
+
+            del coll["name"]
+            del coll["type"]
+
+    sys.stdout.write(json.dumps(rv))
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+import json
+import os.path
+import sys
+
+import deepdiff
+
+if len(sys.argv) != 3:
+    print("invalid args", file=sys.stderr, flush=True)
+    sys.exit(1)
+
+
+def resolve(s):
+    return os.path.realpath(os.path.expandvars(s))
+
+
+with open(resolve(sys.argv[1])) as f:
+    a = json.load(f)
+
+with open(resolve(sys.argv[2])) as f:
+    b = json.load(f)
+
+print(deepdiff.DeepDiff(a, b, ignore_order=True).pretty())

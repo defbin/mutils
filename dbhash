@@ -1,71 +1,107 @@
 #!/usr/bin/env python3
+# pylint: disable=missing-docstring
 
 import hashlib
 import sys
 
 import bson.json_util as json
-import pymongo
+from pymongo import MongoClient
+
+creds = {
+    "username": "adm",
+    "password": "pass",
+}
 
 
-def dump_configsvr(uri):
-    c = pymongo.MongoClient(uri).get_database('config')
-    dbs = list(c.get_collection('databases').find())
-    colls = [c for c in c.get_collection(
-        'collections').find() if c['_id'] != 'config.system.sessions']
-    chunks = list(c.get_collection('chunks').find(
-        {'uuid': {'$in': [coll['uuid'] for coll in colls]}}))
+def dump_configsvr(client: MongoClient):
+    config = client["config"]
+
+    colls = []
+    skip_uuids = []
+    for coll in config["collections"].find():
+        if coll["_id"] == "config.system.sessions":
+            skip_uuids.append(coll["uuid"])
+            continue
+        colls.append(coll)
+
+    databases = list(config["databases"].find())
+    chunks = list(config["chunks"].find({"uuid": {"$nin": skip_uuids}}))
+
     return {
-        'databases': dbs,
-        'collections': colls,
-        'chunks': chunks,
+        "databases": databases,
+        "collections": colls,
+        "chunks": chunks,
     }
 
 
-def dump_shard(uri):
+def dump_shard(client: MongoClient):
     rv = []
-    c = pymongo.MongoClient(uri)
-    for db_name in c.list_database_names():
-        if db_name in ['admin', 'config', 'local']:
+
+    for db_name in client.list_database_names():
+        if db_name in ["admin", "config", "local"]:
             continue
 
-        db = c.get_database(db_name)
-        res = db.command('dbHash')
+        db = client[db_name]
+        res = db.command("dbHash")
         for coll in db.list_collections():
-            n = coll['name']
-            count = db.get_collection(n).count_documents({})
-            rv.append({
-                'ns': f'{db_name}.{n}',
-                'info': coll,
-                'hash': res['collections'][n],
-                'count': count,
-            })
+            coll_name = coll["name"]
+            docs = sorted(db.get_collection(coll_name).find(), key=lambda d: d["_id"])
+            rv.append(
+                {
+                    "ns": f"{db_name}.{coll_name}",
+                    "info": coll,
+                    "hash": res["collections"][coll_name],
+                    "count": len(docs),
+                    "docs": docs,
+                }
+            )
 
     return rv
 
 
-def main():
-    rv = {}
-
-    m = pymongo.MongoClient()
+def prepare_results(client: MongoClient, replsets: dict):
     nss = set()
-    for rs, uri in m.get_database('admin').command('getShardMap')['map'].items():
-        dump = dump_configsvr if rs == 'config' else dump_shard
-        r = rv[rs] = dump(uri.split('/', 1)[1])
-        if rs != 'config':
-            nss.update(c['ns'] for c in r)
+    for rs_name, colls in replsets.items():
+        if rs_name == "config":
+            continue
+        nss.update(c["ns"] for c in colls)
 
-
-    h, c = rv['hash'], rv['count'] = {}, {}
+    hashes, counts, all_docs = {}, {}, {}
     for ns in nss:
-        d, cl = ns.split('.', 1)
-        md5, count = hashlib.md5(), 0
-        for doc in m.get_database(d).get_collection(cl).find():
-            md5.update(doc['_id'].binary + b'|' + doc['i'].to_bytes(2, 'big'))
-            count += 1
-        h[ns], c[ns] = md5.hexdigest(), count
+        docs = []
+        md5 = hashlib.md5()
+
+        db_name, coll_name = ns.split(".", 1)
+        for doc in client[db_name][coll_name].find().sort("_id"):
+            docs.append(doc)
+            md5.update(doc["_id"].binary + b"|" + doc["i"].to_bytes(2, "big"))
+
+        hashes[ns] = md5.hexdigest()
+        counts[ns] = len(docs)
+        all_docs[ns] = docs
+
+    return hashes, counts, all_docs
+
+
+def main():
+    rv = {"rss": {}}
+
+    with MongoClient(**creds) as client:
+        shard_map: dict = client["admin"].command("getShardMap").get("map")
+
+        uri = shard_map.pop("config", None)
+        if uri:
+            with MongoClient(uri.split("/", 1)[1], **creds) as cl:
+                rv["rss"]["config"] = dump_configsvr(cl)
+
+        for rs_name, uri in shard_map.items():
+            with MongoClient(uri.split("/", 1)[1], **creds) as cl:
+                rv["rss"][rs_name] = dump_shard(cl)
+
+        rv["hash"], rv["count"], rv["docs"] = prepare_results(client, rv["rss"])
 
     sys.stdout.write(json.dumps(rv))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
