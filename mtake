@@ -74,7 +74,7 @@ def from_user_view(conn: MongoClient, nss: dict, with_docs: bool) -> tuple[dict,
             md5.update(doc)
             docs.extend(bson.decode_all(doc))
 
-        if len(docs) != 0:
+        if docs:
             briefs[ns] = {"md5": md5.hexdigest(), "count": len(docs)}
         else:
             briefs[ns] = {"md5": "", "count": 0}
