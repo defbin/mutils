@@ -18,7 +18,7 @@ def dump_replset(conn: MongoClient, with_docs: bool) -> tuple[dict, dict[dict]]:
     all_docs = {}
     for db_info in conn.list_databases():
         db_name = db_info["name"]
-        if db_name in "local":
+        if db_name == "local":
             continue
 
         db = conn[db_name]
