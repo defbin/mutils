@@ -44,7 +44,8 @@ def dump_replset(conn: MongoClient, with_docs: bool, exclude) -> tuple[dict, dic
                 info["count"] = len(docs)
 
                 if with_docs:
-                    all_docs[f"{rs_name}:{db_name}.{coll_name}"] = docs
+                    docs.sort(key=lambda d: d.get("_id"))
+                    all_docs[f"{rs_name}:{ns}"] = docs
 
             infos[f"{rs_name}:{ns}"] = info
 
@@ -83,6 +84,7 @@ def from_user_view(conn: MongoClient, nss: dict, with_docs: bool) -> tuple[dict,
             briefs[ns] = {"md5": "", "count": 0}
 
         if with_docs:
+            docs.sort(key=lambda d: d.get("_id"))
             all_docs[":" + ns_name] = docs
 
     return briefs, all_docs
