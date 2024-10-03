@@ -10,6 +10,7 @@ pip install -Ur requirements.txt
 ```bash
 # set MONGODB_URI to not specify --uri
 export MONGODB_URI=user:pass@host:27017
+
 # CSV by default subset of oplog record fields
 mlog > oplog.csv
 
@@ -26,4 +27,7 @@ mtake > snap.json
 
 # include user documents
 mtake --with-docs > snap.json
+
+# exclude namespaces
+mtake --exclude 'admin.system.*,config.actionlog,config.changelog' > snap.json
 ```

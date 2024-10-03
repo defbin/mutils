@@ -11,7 +11,7 @@ import click
 from pymongo import MongoClient
 
 
-def dump_replset(conn: MongoClient, with_docs: bool) -> tuple[dict, dict[dict]]:
+def dump_replset(conn: MongoClient, with_docs: bool, exclude) -> tuple[dict, dict[dict]]:
     rs_name = conn.admin.command("hello")["setName"]
 
     infos = {}
@@ -25,12 +25,15 @@ def dump_replset(conn: MongoClient, with_docs: bool) -> tuple[dict, dict[dict]]:
         db_hash = db.command("dbHash")
         for coll in db.list_collections():
             coll_name = coll["name"]
+            ns = f"{db_name}.{coll_name}"
+            if ns in exclude:
+                continue
 
             if coll["type"] == "collection":
                 coll["info"]["uuid"] = coll["info"]["uuid"].hex()
 
             info = {
-                "ns": f"{db_name}.{coll_name}",
+                "ns": ns,
                 "spec": coll,
             }
             if coll["type"] == "collection":
@@ -43,7 +46,7 @@ def dump_replset(conn: MongoClient, with_docs: bool) -> tuple[dict, dict[dict]]:
                 if with_docs:
                     all_docs[f"{rs_name}:{db_name}.{coll_name}"] = docs
 
-            infos[f"{rs_name}:{db_name}.{coll_name}"] = info
+            infos[f"{rs_name}:{ns}"] = info
 
     return infos, all_docs
 
@@ -51,7 +54,7 @@ def dump_replset(conn: MongoClient, with_docs: bool) -> tuple[dict, dict[dict]]:
 def can_save_docs(db_name: str, coll_name: str) -> bool:
     if db_name == "admin":
         return coll_name != "system.keys"
-    elif db_name == "config":
+    if db_name == "config":
         if coll_name == "mongos" or coll_name.startswith("cache."):
             return False
     if coll_name.startswith("system.buckets."):
@@ -69,7 +72,7 @@ def from_user_view(conn: MongoClient, nss: dict, with_docs: bool) -> tuple[dict,
         if not can_save_docs(db_name, coll_name):
             continue
 
-        md5, docs = hashlib.md5(usedforsecurity=False), []
+        md5, docs = hashlib.md5(), []
         for doc in conn[db_name][coll_name].find_raw_batches():
             md5.update(doc)
             docs.extend(bson.decode_all(doc))
@@ -85,17 +88,46 @@ def from_user_view(conn: MongoClient, nss: dict, with_docs: bool) -> tuple[dict,
     return briefs, all_docs
 
 
+class NSMatcher:
+    def __init__(self, nss: list):
+        self._strs = set()
+        self._fns = []
+        for ns in nss:
+            ns = ns.strip()
+            if ns == "":
+                continue
+            if ns.endswith("*"):
+                self._fns.append(self._new_checker(ns.rstrip("*")))
+            else:
+                self._strs.add(ns)
+
+    def __contains__(self, ns):
+        if ns in self._strs:
+            return True
+        for fn in self._fns:
+            if fn(ns):
+                return True
+        return False
+
+    @staticmethod
+    def _new_checker(ns):
+        return lambda s: s.startswith(ns)
+
+
 @click.command()
 @click.option("--uri", envvar="MONGODB_URI", default="mongodb://localhost:27017")
 @click.option("--with-docs", is_flag=True)
-def command(uri: str, with_docs: bool):
+@click.option("--exclude", default="")
+def command(uri: str, with_docs: bool, exclude: str):
     if not uri.startswith("mongodb://"):
         uri = f"mongodb://{uri}"
+
+    exclude_set = NSMatcher(exclude.split(","))
 
     with MongoClient(uri) as conn:
         parsed = urlparse(uri)
         if not conn.is_mongos:
-            all_infos, _ = dump_replset(conn, with_docs=False)
+            all_infos, _ = dump_replset(conn, with_docs=False, exclude=exclude_set)
             brief, docs = from_user_view(conn, all_infos, with_docs)
             rv = {"nss": all_infos, "brief": brief}
             if with_docs:
@@ -111,7 +143,7 @@ def command(uri: str, with_docs: bool):
             rs_hosts = shard_uri.split("/", 1)[1]
             rs_uri = f"mongodb://{parsed.username}:{parsed.password}@{rs_hosts}"
             with MongoClient(rs_uri) as rs_conn:
-                infos, docs = dump_replset(rs_conn, with_docs)
+                infos, docs = dump_replset(rs_conn, with_docs=with_docs, exclude=exclude_set)
                 all_infos.update(infos)
                 all_docs.update(docs)
 
