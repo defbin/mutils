@@ -1,116 +1,147 @@
 #!/usr/bin/env python3
+# pylint: disable=missing-docstring
 
 import csv
 import heapq
 import sys
+from urllib.parse import urlparse
 
-from bson import json_util as json
+import click
+from bson import json_util as bson
 from pymongo import MongoClient
-
-skip_colls = {
-    'config.mongos',
-    'config.lockpings',
-    'config.system.sessions',
-}
+from pymongo.read_concern import ReadConcern
 
 
-class NoMongosErr(Exception):
-    pass
+def make_cluster_oplog_cursor(uri, **kwargs):
+    parsed = urlparse(uri)
 
+    conn = MongoClient(uri)
+    if not conn.is_mongos:
+        rs_name = conn.topology_description.replica_set_name
+        return oplog_cursor(conn, rs_name, **kwargs)
 
-def make_cluster_oplog_cursor(uri=None,
-                              filter={'op': {'$ne': 'n'}},
-                              projection=['ts', 'rs', 'op', 'ns', 'o', 'o2']):
-    c = MongoClient(uri)
-    if not c.is_mongos:
-        raise NoMongosErr()
+    shard_map = conn["admin"].command("getShardMap").get("map")
+    conn.close()
 
-    shard_map = c.get_database('admin').command('getShardMap')
     cursors = {}
-    for uri in shard_map['map'].values():
-        rs, uri = uri.split('/')
-        c = MongoClient(uri).get_database('local').get_collection('oplog.rs')
-        cursors[rs] = c.find(filter=filter, projection=projection)
+    for shard_uri in shard_map.values():
+        rs_name, hosts = shard_uri.split("/", 1)
+        rs_uri = f"mongodb://{parsed.username}:{parsed.password}@{hosts}"
+        cursors[rs_name] = oplog_cursor(MongoClient(rs_uri), rs_name, **kwargs)
 
     return _merge_cursors(cursors)
 
 
-class _Orderable:
-    def __init__(self, doc): self.d = doc
-    def __eq__(self, o): return self.d['ts'] == o.d['ts']
-    def __lt__(self, o): return self.d['ts'] < o.d['ts']
+def oplog_cursor(conn, rs_name, **kwargs):
+    query = {
+        "ns": {
+            "$nin": ["config.mongos", "config.system.sessions"],
+            "$not": {"$regex": "^config.cache"},
+        },
+        "op": {"$ne": "n"},
+    }
+
+    cond = {}
+    if kwargs.get("start"):
+        cond["$gte"] = kwargs["start"]
+    if kwargs.get("end"):
+        cond["$lte"] = kwargs["end"]
+    if len(cond) != 0:
+        query["ts"] = cond
+
+    oplog_rs = conn["local"].get_collection("oplog.rs", read_concern=ReadConcern("local"))
+    with conn:
+        for doc in oplog_rs.find(query):
+            doc["rs"] = rs_name
+            yield doc
 
 
-def _merge_cursors(rss: dict[str, str]):
+def _merge_cursors(rss):
+    class _Orderable:
+        def __init__(self, doc):
+            self.d = doc
+
+        def __eq__(self, o):
+            return self.d["ts"] == o.d["ts"]
+
+        def __lt__(self, o):
+            return self.d["ts"] < o.d["ts"]
+
     q = []
+
     for rs, cur in rss.items():
         try:
-            doc = cur.next()
+            doc = next(cur)
+            q.append(_Orderable(doc))
         except StopIteration:
-            continue
-
-        doc['rs'] = rs
-        q.append(_Orderable(doc))
-
+            pass
     heapq.heapify(q)
 
-    while len(q):
+    while len(q) != 0:
         doc = heapq.heappop(q).d
-        rs = doc['rs']
+        rs = doc["rs"]
         yield doc
 
         try:
-            doc = rss[rs].next()
+            doc = next(rss[rs])
+            heapq.heappush(q, _Orderable(doc))
         except StopIteration:
-            continue
-
-        doc['rs'] = rs
-        heapq.heappush(q, _Orderable(doc))
+            del rss[rs]
 
 
-def main():
-    uri = 'localhost:27017'
-    filter = {
-        'ns': {'$nin': list(skip_colls)},
-        'op': {'$ne': 'n'},
-    }
-    try:
-        oplog = make_cluster_oplog_cursor(filter=filter)
-    except NoMongosErr:
-        print('ERR: must be mongos', file=sys.stderr, flush=True)
-        exit(1)
+class TimestampParamType(click.ParamType):
+    name = "BSON/MongoDB timestamp"
 
-    w = csv.DictWriter(sys.stdout,
-                       fieldnames=['ts', 'rs', 'ns', 'op', 'q', 'o'],
-                       extrasaction='ignore')
+    def convert(self, value, param, ctx):
+        if isinstance(value, bson.Timestamp):
+            return value
 
-    w.writeheader()
+        try:
+            time, inc = value.split(".", 1)
+            return bson.Timestamp(int(time), int(inc))
+        except:  # pylint: disable=bare-except
+            self.fail(f"{value!r} is not a valid timestamp", param, ctx)
+
+
+@click.command()
+@click.option("--uri", envvar="MONGODB_URI", default="mongodb://localhost:27017")
+@click.option("-s", "--start", type=TimestampParamType(), help="oplog ts ($gte)")
+@click.option("-e", "--end", type=TimestampParamType(), help="oplog ts ($lte)")
+@click.option("--json", is_flag=True, help="produce output as MongoDB Extended JSON v2")
+def command(uri, **kwargs):
+    if not uri.startswith("mongodb://"):
+        uri = f"mongodb://{uri}"
+
+    oplog = make_cluster_oplog_cursor(uri, **kwargs)
+    if kwargs["json"]:
+        sys.stdout.write("[\n")
+        for doc in oplog:
+            sys.stdout.write(bson.dumps(doc) + ",\n")
+        sys.stdout.write("]")
+        return
+
+    w = csv.DictWriter(
+        sys.stdout,
+        fieldnames=["ts", "rs", "ns", "op", "o"],
+        extrasaction="ignore",
+        lineterminator="\n",
+    )
+
     for doc in oplog:
-        if doc['op'] == 'n':
-            continue
-
-        w.writerow({
-            'ts': f'{doc["ts"].time}.{doc["ts"].inc}',
-            'rs': doc['rs'],
-            'ns': doc['ns'],
-            'op': doc['op'],
-            'q': doc.get('o2'),
-            'o': json.dumps(doc['o']),
-        })
+        w.writerow(
+            {
+                "ts": f'{doc["ts"].time}.{doc["ts"].inc}',
+                "rs": doc.get("rs"),
+                "ns": doc["ns"],
+                "op": doc["op"],
+                "o": bson.dumps(doc["o"]),
+            }
+        )
 
 
-def parse_argv():
-    import argparse
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--uri', help='Mongos URI')
-    parser.add_argument('range', help='Cluster time range (e.g. 0:)')
-    args, _ = parser.parse_known_args()
-    return args
-
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     from signal import SIG_DFL, SIGPIPE, signal
 
     signal(SIGPIPE, SIG_DFL)
-    main()
+
+    command()  # pylint: disable=no-value-for-parameter
