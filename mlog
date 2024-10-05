@@ -11,14 +11,15 @@ from bson import json_util as bson
 from pymongo import MongoClient
 from pymongo.read_concern import ReadConcern
 
+import mutils
+
 
 def make_cluster_oplog_cursor(uri, **kwargs):
     parsed = urlparse(uri)
 
     conn = MongoClient(uri)
     if not conn.is_mongos:
-        rs_name = conn.topology_description.replica_set_name
-        return oplog_cursor(conn, rs_name, **kwargs)
+        return oplog_cursor(conn, **kwargs)
 
     shard_map = conn["admin"].command("getShardMap").get("map")
     conn.close()
@@ -27,18 +28,20 @@ def make_cluster_oplog_cursor(uri, **kwargs):
     for shard_uri in shard_map.values():
         rs_name, hosts = shard_uri.split("/", 1)
         rs_uri = f"mongodb://{parsed.username}:{parsed.password}@{hosts}"
-        cursors[rs_name] = oplog_cursor(MongoClient(rs_uri), rs_name, **kwargs)
+        cursors[rs_name] = oplog_cursor(MongoClient(rs_uri), **kwargs)
 
     return _merge_cursors(cursors)
 
 
-def oplog_cursor(conn, rs_name, **kwargs):
+def oplog_cursor(conn, **kwargs):
+    excluded = kwargs.get("excluded", set())
+
     query = {
+        "op": {"$ne": "n"},
         "ns": {
             "$nin": ["config.mongos", "config.system.sessions"],
             "$not": {"$regex": "^config.cache"},
         },
-        "op": {"$ne": "n"},
     }
 
     cond = {}
@@ -46,18 +49,21 @@ def oplog_cursor(conn, rs_name, **kwargs):
         cond["$gte"] = kwargs["start"]
     if kwargs.get("end"):
         cond["$lte"] = kwargs["end"]
-    if len(cond) != 0:
+    if cond:
         query["ts"] = cond
 
-    oplog_rs = conn["local"].get_collection("oplog.rs", read_concern=ReadConcern("local"))
     with conn:
+        rs_name = conn.admin.command("hello")["setName"]
+        oplog_rs = conn["local"].get_collection("oplog.rs", read_concern=ReadConcern("local"))
         for doc in oplog_rs.find(query):
+            if doc["ns"] in excluded:
+                continue
             doc["rs"] = rs_name
             yield doc
 
 
 def _merge_cursors(rss):
-    class _Orderable:
+    class Orderable:
         def __init__(self, doc):
             self.d = doc
 
@@ -72,7 +78,7 @@ def _merge_cursors(rss):
     for rs, cur in rss.items():
         try:
             doc = next(cur)
-            q.append(_Orderable(doc))
+            q.append(Orderable(doc))
         except StopIteration:
             pass
     heapq.heapify(q)
@@ -84,7 +90,7 @@ def _merge_cursors(rss):
 
         try:
             doc = next(rss[rs])
-            heapq.heappush(q, _Orderable(doc))
+            heapq.heappush(q, Orderable(doc))
         except StopIteration:
             del rss[rs]
 
@@ -107,12 +113,14 @@ class TimestampParamType(click.ParamType):
 @click.option("--uri", envvar="MONGODB_URI", default="mongodb://localhost:27017")
 @click.option("-s", "--start", type=TimestampParamType(), help="oplog ts ($gte)")
 @click.option("-e", "--end", type=TimestampParamType(), help="oplog ts ($lte)")
+@click.option("--exclude", default="")
 @click.option("--json", is_flag=True, help="produce output as MongoDB Extended JSON v2")
 def command(uri, **kwargs):
     if not uri.startswith("mongodb://"):
         uri = f"mongodb://{uri}"
 
-    oplog = make_cluster_oplog_cursor(uri, **kwargs)
+    excluded = mutils.NSMatcher(kwargs.get("exclude", "").split(","))
+    oplog = make_cluster_oplog_cursor(uri, **kwargs, excluded=excluded)
     if kwargs["json"]:
         sys.stdout.write("[\n")
         for doc in oplog:

@@ -10,23 +10,27 @@ import bson.json_util as json
 import click
 from pymongo import MongoClient
 
+import mutils
 
-def dump_replset(conn: MongoClient, with_docs: bool, exclude) -> tuple[dict, dict[dict]]:
+
+def doc_sort_key(doc: dict):
+    _id = doc.get("_id")
+    return _id if isinstance(_id, (bson.ObjectId, int, str)) else 0
+
+
+def dump_replset(conn: MongoClient, with_docs: bool, excluded: set) -> tuple[dict, dict[dict]]:
     rs_name = conn.admin.command("hello")["setName"]
 
     infos = {}
     all_docs = {}
     for db_info in conn.list_databases():
         db_name = db_info["name"]
-        if db_name == "local":
-            continue
-
         db = conn[db_name]
         db_hash = db.command("dbHash")
         for coll in db.list_collections():
             coll_name = coll["name"]
             ns = f"{db_name}.{coll_name}"
-            if ns in exclude:
+            if ns in excluded:
                 continue
 
             if coll["type"] == "collection":
@@ -37,14 +41,14 @@ def dump_replset(conn: MongoClient, with_docs: bool, exclude) -> tuple[dict, dic
                 "spec": coll,
             }
             if coll["type"] == "collection":
-                info["dbHash"] = db_hash["collections"][coll_name]
+                info["dbHash"] = db_hash["collections"].get(coll_name, "")
 
-            if can_save_docs(db_name, coll_name):
+            if should_view_docs(db_name, coll_name):
                 docs = list(db[coll_name].find())
                 info["count"] = len(docs)
 
                 if with_docs:
-                    docs.sort(key=lambda d: d.get("_id"))
+                    docs.sort(key=doc_sort_key)
                     all_docs[f"{rs_name}:{ns}"] = docs
 
             infos[f"{rs_name}:{ns}"] = info
@@ -52,16 +56,31 @@ def dump_replset(conn: MongoClient, with_docs: bool, exclude) -> tuple[dict, dic
     return infos, all_docs
 
 
-def can_save_docs(db_name: str, coll_name: str) -> bool:
-    if db_name == "admin":
-        return coll_name != "system.keys"
-    if db_name == "config":
-        if coll_name == "mongos" or coll_name.startswith("cache."):
-            return False
-    if coll_name.startswith("system.buckets."):
-        return True
+def is_system_collection(coll_name: str) -> bool:
+    return coll_name.startswith("system.")
 
-    return not coll_name.startswith("system.")
+
+def is_timeseries_bucket(coll_name: str) -> bool:
+    return coll_name.startswith("system.buckets.")
+
+
+def should_view_docs(db_name: str, coll_name: str) -> bool:
+    match db_name:
+        case "local":
+            return False
+        case "admin":
+            return coll_name != "system.keys"
+        case "config":
+            return is_timeseries_bucket(coll_name) or coll_name in [
+                "shards",
+                "databases",
+                "collections",
+                "chunks",
+                "tags",
+                "version",
+            ]
+
+    return is_timeseries_bucket(coll_name) or not is_system_collection(coll_name)
 
 
 def from_user_view(conn: MongoClient, nss: dict, with_docs: bool) -> tuple[dict, dict]:
@@ -70,7 +89,9 @@ def from_user_view(conn: MongoClient, nss: dict, with_docs: bool) -> tuple[dict,
     for ns in nss.keys():
         _, ns_name = ns.split(":", 1)
         db_name, coll_name = ns_name.split(".", 1)
-        if not can_save_docs(db_name, coll_name):
+        # if db_name in ("admin", "config", "local") or is_system_collection(coll_name):
+        #     continue
+        if not should_view_docs(db_name, coll_name):
             continue
 
         md5, docs = hashlib.md5(), []
@@ -84,36 +105,10 @@ def from_user_view(conn: MongoClient, nss: dict, with_docs: bool) -> tuple[dict,
             briefs[ns] = {"md5": "", "count": 0}
 
         if with_docs:
-            docs.sort(key=lambda d: d.get("_id"))
+            docs.sort(key=doc_sort_key)
             all_docs[":" + ns_name] = docs
 
     return briefs, all_docs
-
-
-class NSMatcher:
-    def __init__(self, nss: list):
-        self._strs = set()
-        self._fns = []
-        for ns in nss:
-            ns = ns.strip()
-            if ns == "":
-                continue
-            if ns.endswith("*"):
-                self._fns.append(self._new_checker(ns.rstrip("*")))
-            else:
-                self._strs.add(ns)
-
-    def __contains__(self, ns):
-        if ns in self._strs:
-            return True
-        for fn in self._fns:
-            if fn(ns):
-                return True
-        return False
-
-    @staticmethod
-    def _new_checker(ns):
-        return lambda s: s.startswith(ns)
 
 
 @click.command()
@@ -121,39 +116,32 @@ class NSMatcher:
 @click.option("--with-docs", is_flag=True)
 @click.option("--exclude", default="")
 def command(uri: str, with_docs: bool, exclude: str):
+    excluded = mutils.NSMatcher(exclude.split(","))
     if not uri.startswith("mongodb://"):
         uri = f"mongodb://{uri}"
 
-    exclude_set = NSMatcher(exclude.split(","))
-
     with MongoClient(uri) as conn:
         parsed = urlparse(uri)
+
+        all_infos, all_docs = {}, {}
         if not conn.is_mongos:
-            all_infos, _ = dump_replset(conn, with_docs=False, exclude=exclude_set)
-            brief, docs = from_user_view(conn, all_infos, with_docs)
-            rv = {"nss": all_infos, "brief": brief}
-            if with_docs:
-                rv["docs"] = docs
-
-            sys.stdout.write(json.dumps(rv))
-            return
-
-        all_infos = {}
-        all_docs = {}
-        shard_map = conn["admin"].command("getShardMap")["map"]
-        for shard_uri in shard_map.values():
-            rs_hosts = shard_uri.split("/", 1)[1]
-            rs_uri = f"mongodb://{parsed.username}:{parsed.password}@{rs_hosts}"
-            with MongoClient(rs_uri) as rs_conn:
-                infos, docs = dump_replset(rs_conn, with_docs=with_docs, exclude=exclude_set)
-                all_infos.update(infos)
-                all_docs.update(docs)
+            all_infos, _ = dump_replset(conn, False, excluded)
+        else:
+            shard_map = conn["admin"].command("getShardMap")["map"]
+            for shard_uri in shard_map.values():
+                rs_hosts = shard_uri.split("/", 1)[1]
+                rs_uri = f"mongodb://{parsed.username}:{parsed.password}@{rs_hosts}"
+                with MongoClient(rs_uri) as rs_conn:
+                    infos, docs = dump_replset(rs_conn, with_docs, excluded)
+                    all_infos.update(infos)
+                    if with_docs:
+                        all_docs.update(docs)
 
         brief, docs = from_user_view(conn, all_infos, with_docs)
-        all_docs.update(docs)
         rv = {"nss": all_infos, "brief": brief}
         if with_docs:
-            rv["all_docs"] = all_docs
+            all_docs.update(docs)
+            rv["docs"] = all_docs
 
     sys.stdout.write(json.dumps(rv))
 
