@@ -6,8 +6,9 @@ import heapq
 import sys
 from urllib.parse import urlparse
 
+import bson
+import bson.json_util as json
 import click
-from bson import json_util as bson
 from pymongo import MongoClient
 from pymongo.read_concern import ReadConcern
 
@@ -111,6 +112,7 @@ class TimestampParamType(click.ParamType):
 
 @click.command()
 @click.option("--uri", envvar="MONGODB_URI", default="mongodb://localhost:27017")
+@click.option("-o", "--out", default=sys.stdout, type=click.File("w", lazy=True))
 @click.option("-s", "--start", type=TimestampParamType(), help="oplog ts ($gte)")
 @click.option("-e", "--end", type=TimestampParamType(), help="oplog ts ($lte)")
 @click.option("--exclude", default="")
@@ -124,12 +126,12 @@ def command(uri, **kwargs):
     if kwargs["json"]:
         sys.stdout.write("[\n")
         for doc in oplog:
-            sys.stdout.write(bson.dumps(doc) + ",\n")
+            sys.stdout.write(json.dumps(doc) + ",\n")
         sys.stdout.write("]")
         return
 
     w = csv.DictWriter(
-        sys.stdout,
+        kwargs["out"],
         fieldnames=["ts", "rs", "ns", "op", "o"],
         extrasaction="ignore",
         lineterminator="\n",
@@ -142,7 +144,7 @@ def command(uri, **kwargs):
                 "rs": doc.get("rs"),
                 "ns": doc["ns"],
                 "op": doc["op"],
-                "o": bson.dumps(doc["o"]),
+                "o": json.dumps(doc["o"]),
             }
         )
 
