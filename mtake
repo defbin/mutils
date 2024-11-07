@@ -12,13 +12,27 @@ from pymongo import MongoClient
 
 import mutils
 
+admin_collections = [
+    "system.users",
+    "system.roles",
+    "system.version",
+]
 
-def doc_sort_key(doc: dict):
-    _id = doc.get("_id")
-    return _id if isinstance(_id, (bson.ObjectId, int, str)) else 0
+config_collections = [
+    "shards",
+    "databases",
+    "collections",
+    "chunks",
+    "tags",
+    "version",
+]
 
 
-def dump_replset(conn: MongoClient, with_docs: bool, excluded: set) -> tuple[dict, dict[dict]]:
+def dump_replset(
+    conn: MongoClient,
+    with_docs: bool,
+    excluded: mutils.NSMatcher,
+) -> tuple[dict, dict[dict]]:
     rs_name = conn.admin.command("hello")["setName"]
 
     infos = {}
@@ -43,12 +57,12 @@ def dump_replset(conn: MongoClient, with_docs: bool, excluded: set) -> tuple[dic
             if coll["type"] == "collection":
                 info["dbHash"] = db_hash["collections"].get(coll_name, "")
 
-            if should_view_docs(db_name, coll_name):
+            if should_view_spec(db_name, coll_name):
                 docs = list(db[coll_name].find())
                 info["count"] = len(docs)
 
                 if with_docs:
-                    docs.sort(key=doc_sort_key)
+                    docs.sort(key=mutils.doc_sort_key)
                     all_docs[f"{rs_name}:{ns}"] = docs
 
             infos[f"{rs_name}:{ns}"] = info
@@ -64,21 +78,24 @@ def is_timeseries_bucket(coll_name: str) -> bool:
     return coll_name.startswith("system.buckets.")
 
 
-def should_view_docs(db_name: str, coll_name: str) -> bool:
+def should_view_spec(db_name: str, coll_name: str) -> bool:
     match db_name:
         case "local":
             return False
         case "admin":
             return coll_name != "system.keys"
+
+    return is_timeseries_bucket(coll_name) or not is_system_collection(coll_name)
+
+
+def should_view_docs(db_name: str, coll_name: str) -> bool:
+    match db_name:
+        case "local":
+            return False
+        case "admin":
+            return coll_name in admin_collections
         case "config":
-            return is_timeseries_bucket(coll_name) or coll_name in [
-                "shards",
-                "databases",
-                "collections",
-                "chunks",
-                "tags",
-                "version",
-            ]
+            return coll_name in config_collections
 
     return is_timeseries_bucket(coll_name) or not is_system_collection(coll_name)
 
@@ -87,10 +104,8 @@ def from_user_view(conn: MongoClient, nss: dict, with_docs: bool) -> tuple[dict,
     briefs, all_docs = {}, {}
 
     for ns in nss.keys():
-        _, ns_name = ns.split(":", 1)
+        ns_name = ns.split(":", 1)[1]
         db_name, coll_name = ns_name.split(".", 1)
-        # if db_name in ("admin", "config", "local") or is_system_collection(coll_name):
-        #     continue
         if not should_view_docs(db_name, coll_name):
             continue
 
@@ -105,7 +120,7 @@ def from_user_view(conn: MongoClient, nss: dict, with_docs: bool) -> tuple[dict,
             briefs[ns] = {"md5": "", "count": 0}
 
         if with_docs:
-            docs.sort(key=doc_sort_key)
+            docs.sort(key=mutils.doc_sort_key)
             all_docs[":" + ns_name] = docs
 
     return briefs, all_docs
@@ -115,18 +130,19 @@ def from_user_view(conn: MongoClient, nss: dict, with_docs: bool) -> tuple[dict,
 @click.option("--uri", envvar="MONGODB_URI", default="mongodb://localhost:27017")
 @click.option("--with-docs", is_flag=True)
 @click.option("--exclude", default="")
-def command(uri: str, with_docs: bool, exclude: str):
-    excluded = mutils.NSMatcher(exclude.split(","))
+def command(uri: str, **kwargs):
     if not uri.startswith("mongodb://"):
         uri = f"mongodb://{uri}"
 
-    with MongoClient(uri) as conn:
-        parsed = urlparse(uri)
+    with_docs = kwargs.get("with_docs", False)
+    excluded = mutils.NSMatcher(kwargs.pop("exclude", "").split(","))
 
+    with MongoClient(uri) as conn:
         all_infos, all_docs = {}, {}
         if not conn.is_mongos:
             all_infos, _ = dump_replset(conn, False, excluded)
         else:
+            parsed = urlparse(uri)
             shard_map = conn["admin"].command("getShardMap")["map"]
             for shard_uri in shard_map.values():
                 rs_hosts = shard_uri.split("/", 1)[1]

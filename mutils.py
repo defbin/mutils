@@ -1,4 +1,5 @@
 # pylint: disable=missing-docstring
+import bson
 
 
 class NSMatcher:
@@ -24,3 +25,8 @@ class NSMatcher:
             if ns.startswith(prefix):
                 return True
         return False
+
+
+def doc_sort_key(doc: dict):
+    _id = doc.get("_id")
+    return _id if isinstance(_id, (bson.ObjectId, int, str)) else 0
