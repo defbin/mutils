@@ -97,7 +97,7 @@ def _merge_cursors(rss):
 
 
 class TimestampParamType(click.ParamType):
-    name = "BSON/MongoDB timestamp"
+    name = "BSON timestamp"
 
     def convert(self, value, param, ctx):
         if isinstance(value, bson.Timestamp):
@@ -111,23 +111,52 @@ class TimestampParamType(click.ParamType):
 
 
 @click.command()
-@click.option("--uri", envvar="MONGODB_URI", default="mongodb://localhost:27017")
-@click.option("-o", "--out", default=sys.stdout, type=click.File("w", lazy=True))
-@click.option("-s", "--start", type=TimestampParamType(), help="oplog ts ($gte)")
-@click.option("-e", "--end", type=TimestampParamType(), help="oplog ts ($lte)")
-@click.option("--exclude", default="")
-@click.option("--json", is_flag=True, help="produce output as MongoDB Extended JSON v2")
+@click.option(
+    "--uri",
+    default="localhost:27017",
+    envvar="MONGODB_URI",
+    help="MongoDB URI. Default: localhost:27017.",
+)
+@click.option(
+    "-o",
+    "--out",
+    default=sys.stdout,
+    type=click.File("w", lazy=True),
+    help="Output file. Default: stdout.",
+)
+@click.option(
+    "-s",
+    "--start",
+    type=TimestampParamType(),
+    help="Min oplog ts ($gte).",
+)
+@click.option(
+    "-e",
+    "--end",
+    type=TimestampParamType(),
+    help="Max oplog ts ($lte).",
+)
+@click.option(
+    "--exclude",
+    default="Namespaces to exclude.",
+)
+@click.option(
+    "--json",
+    is_flag=True,
+    help="Produce output as MongoDB Extended JSON v2.",
+)
 def command(uri, **kwargs):
     if not uri.startswith("mongodb://"):
         uri = f"mongodb://{uri}"
+    out = kwargs.get("out", sys.stdout)
 
     excluded = mutils.NSMatcher(kwargs.get("exclude", "").split(","))
     oplog = make_cluster_oplog_cursor(uri, **kwargs, excluded=excluded)
     if kwargs["json"]:
-        sys.stdout.write("[\n")
+        out.write("[\n")
         for doc in oplog:
-            sys.stdout.write(json.dumps(doc) + ",\n")
-        sys.stdout.write("]")
+            out.write(json.dumps(doc) + ",\n")
+        out.write("]")
         return
 
     w = csv.DictWriter(

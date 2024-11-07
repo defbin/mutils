@@ -112,10 +112,34 @@ def from_user_view(conn: MongoClient, nss: dict, with_docs: bool) -> tuple[dict,
 
 
 @click.command()
-@click.option("--uri", envvar="MONGODB_URI", default="mongodb://localhost:27017")
-@click.option("--with-docs", is_flag=True)
-@click.option("--with-system", is_flag=True)
-@click.option("--exclude", default="")
+@click.option(
+    "--uri",
+    default="localhost:27017",
+    envvar="MONGODB_URI",
+    help="MongoDB URI. Default: localhost:27017.",
+)
+@click.option(
+    "-o",
+    "--out",
+    default=sys.stdout,
+    type=click.File("w", lazy=True),
+    help="Output file. Default: stdout",
+)
+@click.option(
+    "--with-docs",
+    is_flag=True,
+    help="Include documents content.",
+)
+@click.option(
+    "--with-system",
+    is_flag=True,
+    help="Include system collections.",
+)
+@click.option(
+    "--exclude",
+    default="",
+    help="Namespaces to exclude.",
+)
 def command(uri: str, **kwargs):
     if not uri.startswith("mongodb://"):
         uri = f"mongodb://{uri}"
@@ -147,7 +171,7 @@ def command(uri: str, **kwargs):
 
     if not kwargs.get("with_system", False):
         rv = mutils.mtrim(rv)
-    sys.stdout.write(json.dumps(rv))
+    kwargs.get("out", sys.stdout).write(json.dumps(rv))
 
 
 if __name__ == "__main__":
