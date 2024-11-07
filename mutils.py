@@ -63,6 +63,10 @@ def mtrim(src):
         dst["nss"][key] = src["nss"][key]
         if key in src["brief"]:
             dst["brief"][key] = src["brief"][key]
+
+        if "docs" not in src:
+            continue
+
         if key in src["docs"]:
             dst["docs"][key] = src["docs"][key]
             dst["docs"][key].sort(key=doc_sort_key)
