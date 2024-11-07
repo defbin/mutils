@@ -12,21 +12,6 @@ from pymongo import MongoClient
 
 import mutils
 
-admin_collections = [
-    "system.users",
-    "system.roles",
-    "system.version",
-]
-
-config_collections = [
-    "shards",
-    "databases",
-    "collections",
-    "chunks",
-    "tags",
-    "version",
-]
-
 
 def dump_replset(
     conn: MongoClient,
@@ -93,9 +78,9 @@ def should_view_docs(db_name: str, coll_name: str) -> bool:
         case "local":
             return False
         case "admin":
-            return coll_name in admin_collections
+            return coll_name in mutils.admin_collections
         case "config":
-            return coll_name in config_collections
+            return coll_name in mutils.config_collections
 
     return is_timeseries_bucket(coll_name) or not is_system_collection(coll_name)
 
@@ -129,6 +114,7 @@ def from_user_view(conn: MongoClient, nss: dict, with_docs: bool) -> tuple[dict,
 @click.command()
 @click.option("--uri", envvar="MONGODB_URI", default="mongodb://localhost:27017")
 @click.option("--with-docs", is_flag=True)
+@click.option("--with-system", is_flag=True)
 @click.option("--exclude", default="")
 def command(uri: str, **kwargs):
     if not uri.startswith("mongodb://"):
@@ -159,6 +145,8 @@ def command(uri: str, **kwargs):
             all_docs.update(docs)
             rv["docs"] = all_docs
 
+    if not kwargs.get("with_system", False):
+        rv = mutils.mtrim(rv)
     sys.stdout.write(json.dumps(rv))
 
 
