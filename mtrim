@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+# pylint: disable=missing-docstring
+
+import json
+import sys
+
+import click
+
+import mutils
+
+
+@click.command()
+@click.option("-f", "--file", default=sys.stdin, type=click.File("r"))
+@click.option("-o", "--out", default=sys.stdout, type=click.File("w", lazy=True))
+def command(file, out):
+    src = json.load(file)
+    dst = mutils.mtrim(src)
+    json.dump(dst, out, indent=2)
+
+
+if __name__ == "__main__":
+    command()  # pylint: disable=no-value-for-parameter

@@ -1,0 +1,21 @@
+#!/usr/bin/env python3
+# pylint: disable=missing-docstring
+
+import json
+
+import click
+import deepdiff
+
+
+@click.command()
+@click.argument("file1", type=click.File("r"))
+@click.argument("file2", type=click.File("r"))
+def command(file1, file2):
+    a = json.load(file1)
+    b = json.load(file2)
+
+    click.echo(deepdiff.DeepDiff(a, b, ignore_order=True).pretty())
+
+
+if __name__ == "__main__":
+    command()  # pylint: disable=no-value-for-parameter
