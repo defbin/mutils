@@ -72,7 +72,7 @@ def mtrim(src):
             dst["docs"][key].sort(key=doc_sort_key)
         if not coll.startswith("system.") and f":{ns}" in src["docs"]:
             dst["docs"][f":{ns}"] = src["docs"][f":{ns}"]
-            dst["docs"][key].sort(key=doc_sort_key)
+            dst["docs"][f":{ns}"].sort(key=doc_sort_key)
 
     return dst
 
