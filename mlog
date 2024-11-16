@@ -15,12 +15,12 @@ from pymongo.read_concern import ReadConcern
 import mutils
 
 
-def make_cluster_oplog_cursor(uri, **kwargs):
+def make_cluster_oplog_cursor(uri: str, start: bson.Timestamp, end: bson.Timestamp, excluded: list):
     parsed = urlparse(uri)
 
     conn = MongoClient(uri)
     if not conn.is_mongos:
-        return oplog_cursor(conn, **kwargs)
+        return oplog_cursor(conn, start, end, excluded)
 
     shard_map = conn["admin"].command("getShardMap").get("map")
     conn.close()
@@ -29,14 +29,12 @@ def make_cluster_oplog_cursor(uri, **kwargs):
     for shard_uri in shard_map.values():
         rs_name, hosts = shard_uri.split("/", 1)
         rs_uri = f"mongodb://{parsed.username}:{parsed.password}@{hosts}"
-        cursors[rs_name] = oplog_cursor(MongoClient(rs_uri), **kwargs)
+        cursors[rs_name] = oplog_cursor(MongoClient(rs_uri), start, end, excluded)
 
     return _merge_cursors(cursors)
 
 
-def oplog_cursor(conn, **kwargs):
-    excluded = kwargs.get("excluded", set())
-
+def oplog_cursor(conn: MongoClient, start: bson.Timestamp, end: bson.Timestamp, excluded: list):
     query = {
         "op": {"$ne": "n"},
         "ns": {
@@ -46,10 +44,10 @@ def oplog_cursor(conn, **kwargs):
     }
 
     cond = {}
-    if kwargs.get("start"):
-        cond["$gte"] = kwargs["start"]
-    if kwargs.get("end"):
-        cond["$lte"] = kwargs["end"]
+    if start:
+        cond["$gte"] = start
+    if end:
+        cond["$lte"] = end
     if cond:
         query["ts"] = cond
 
@@ -148,11 +146,12 @@ class TimestampParamType(click.ParamType):
 def command(uri, **kwargs):
     if not uri.startswith("mongodb://"):
         uri = f"mongodb://{uri}"
-    out = kwargs.get("out", sys.stdout)
 
-    excluded = mutils.NSMatcher(kwargs.get("exclude", "").split(","))
-    oplog = make_cluster_oplog_cursor(uri, **kwargs, excluded=excluded)
+    excluded = mutils.NSMatcher(kwargs["exclude"].split(","))
+    oplog = make_cluster_oplog_cursor(uri, kwargs["start"], kwargs["end"], excluded)
+
     if kwargs["json"]:
+        out = kwargs["out"]
         out.write("[\n")
         for doc in oplog:
             out.write(json.dumps(doc) + ",\n")

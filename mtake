@@ -17,7 +17,7 @@ def dump_replset(
     conn: MongoClient,
     with_docs: bool,
     excluded: mutils.NSMatcher,
-) -> tuple[dict, dict[dict]]:
+) -> tuple[dict, dict]:
     rs_name = conn.admin.command("hello")["setName"]
 
     infos = {}
@@ -144,7 +144,7 @@ def command(uri: str, **kwargs):
     if not uri.startswith("mongodb://"):
         uri = f"mongodb://{uri}"
 
-    with_docs = kwargs.get("with_docs", False)
+    with_docs = kwargs["with_docs"]
     excluded = mutils.NSMatcher(kwargs.pop("exclude", "").split(","))
 
     with MongoClient(uri) as conn:
@@ -169,9 +169,9 @@ def command(uri: str, **kwargs):
             all_docs.update(docs)
             rv["docs"] = all_docs
 
-    if not kwargs.get("with_system", False):
+    if not kwargs["with_system"]:
         rv = mutils.mtrim(rv)
-    kwargs.get("out", sys.stdout).write(json.dumps(rv))
+    kwargs["out"].write(json.dumps(rv))
 
 
 if __name__ == "__main__":
